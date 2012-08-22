@@ -387,3 +387,15 @@ QVariantMap Phantom::keys() const
 {
     return m_keyMap;
 }
+
+QString Phantom::getStdinLine()
+{
+    std::string instr;
+    while(true) {
+        int ch = std::cin.get();
+        if (ch == '\n' || ch == EOF)
+            break;
+        instr.push_back(static_cast<char>(ch));
+    }
+    return QString(instr.c_str());
+}

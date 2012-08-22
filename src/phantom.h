@@ -32,6 +32,7 @@
 #define PHANTOM_H
 
 #include <QPointer>
+#include <iostream>
 
 #include "csconverter.h"
 #include "filesystem.h"
@@ -104,6 +105,7 @@ public slots:
     QObject *createCallback();
     void loadModule(const QString &moduleSource, const QString &filename);
     bool injectJs(const QString &jsFilePath);
+    QString getStdinLine();
 
     // exit() will not exit in debug mode. debugExit() will always exit.
     void exit(int code = 0);

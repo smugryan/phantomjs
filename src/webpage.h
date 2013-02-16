@@ -36,8 +36,6 @@
 #include <QWebPage>
 #include <QWebFrame>
 
-#include "replcompletable.h"
-
 class Config;
 class CustomPage;
 class WebpageCallbacks;
@@ -45,11 +43,19 @@ class NetworkAccessManager;
 class QWebInspector;
 class Phantom;
 
-class WebPage: public REPLCompletable, public QWebFrame::PrintCallback
+class WebPage : public QObject, public QWebFrame::PrintCallback
 {
     Q_OBJECT
+    Q_PROPERTY(QString title READ title)
+    Q_PROPERTY(QString frameTitle READ frameTitle)
     Q_PROPERTY(QString content READ content WRITE setContent)
+    Q_PROPERTY(QString frameContent READ frameContent WRITE setFrameContent)
+    Q_PROPERTY(QString url READ url)
+    Q_PROPERTY(QString frameUrl READ frameUrl)
+    Q_PROPERTY(bool canGoBack READ canGoBack)
+    Q_PROPERTY(bool canGoForward READ canGoForward)
     Q_PROPERTY(QString plainText READ plainText)
+    Q_PROPERTY(QString framePlainText READ framePlainText)
     Q_PROPERTY(QString libraryPath READ libraryPath WRITE setLibraryPath)
     Q_PROPERTY(QString offlineStoragePath READ offlineStoragePath)
     Q_PROPERTY(int offlineStorageQuota READ offlineStorageQuota)
@@ -64,19 +70,31 @@ class WebPage: public REPLCompletable, public QWebFrame::PrintCallback
     Q_PROPERTY(QString windowName READ windowName)
     Q_PROPERTY(QObjectList pages READ pages)
     Q_PROPERTY(QStringList pagesWindowName READ pagesWindowName)
+    Q_PROPERTY(bool ownsPages READ ownsPages WRITE setOwnsPages)
     Q_PROPERTY(QStringList framesName READ framesName)
     Q_PROPERTY(QString frameName READ frameName)
     Q_PROPERTY(int framesCount READ framesCount)
+    Q_PROPERTY(QString focusedFrameName READ focusedFrameName)
 
 public:
     WebPage(QObject *parent, const QUrl &baseUrl = QUrl());
+    virtual ~WebPage();
 
     QWebFrame *mainFrame();
 
     QString content() const;
+    QString frameContent() const;
     void setContent(const QString &content);
+    void setFrameContent(const QString &content);
+
+    QString title() const;
+    QString frameTitle() const;
+
+    QString url() const;
+    QString frameUrl() const;
 
     QString plainText() const;
+    QString framePlainText() const;
 
     QString libraryPath() const;
     void setLibraryPath(const QString &dirPath);
@@ -135,6 +153,8 @@ public:
      *
      * NOTE: The ownership of this array is held by the Page: it's not adviced
      * to have a "long running reference" to this array, as it might change.
+     * NOTE: If "ownsPages()" is "false", the page will create pages but not
+     * hold any ownership to it. Resource management is than left to the user.
      *
      * @brief pages
      * @return List (JS Array) containing the Pages that this page
@@ -147,12 +167,34 @@ public:
      * NOTE: When a page is opened with <code>"window.open"</code>, a window
      * <code>"name"</code> might be provided as second parameter.
      * This provides a useful list of those.
+     * NOTE: If "ownsPages()" is "false", the page will create pages but not
+     * hold any ownership of it. Resource management is than left to the user.
      *
      * @brief pagesWindowName
      * @return List (JS Array) containing the <code>'window.name'</code>(s) of
      *         Pages that this page has currently open.
      */
     QStringList pagesWindowName() const;
+
+    /**
+     * Returns "true" if it owns the pages it creates (and keeps them in "pages[]").
+     * Default value is "true". Can be changed using {@link setOwnsPages()}.
+     *
+     * @brief ownsPages()
+     * @return "true" if it owns the pages it creates in "pages[]", "false" otherwise.
+     */
+    bool ownsPages() const;
+    /**
+     * Set if, from now on, it should own the pages it creates in "pages[]".
+     * Default value is "true".
+     *
+     * NOTE: When switching from "false" to "true", only the pages created
+     * from that point on will be owned. It's NOT retroactive.
+     *
+     * @brief setOwnsPages
+     * @param owns "true" to make it own the pages it creates in "pages[]", "false" otherwise.
+     */
+    void setOwnsPages(const bool owns);
 
     /**
      * Returns the number of Child Frames inside the Current Frame.
@@ -177,13 +219,21 @@ public:
      * @return Name of the Current Frame
      */
     QString frameName() const;
+    /**
+     * Returns the currently focused Frame's name.
+     *
+     * @brief focusedFrameName
+     * @return Frame
+     */
+    QString focusedFrameName() const;
 
 public slots:
     void openUrl(const QString &address, const QVariant &op, const QVariantMap &settings);
     void release();
+    void close();
 
     QVariant evaluateJavaScript(const QString &code);
-    bool render(const QString &fileName);
+    bool render(const QString &fileName, const QVariantMap &map = QVariantMap());
     /**
      * Render the page as base-64 encoded string.
      * Default image format is "png".
@@ -200,11 +250,13 @@ public slots:
     bool injectJs(const QString &jsFilePath);
     void _appendScriptElement(const QString &scriptUrl);
     QObject *_getGenericCallback();
+    QObject *_getFilePickerCallback();
     QObject *_getJsConfirmCallback();
     QObject *_getJsPromptCallback();
-    void uploadFile(const QString &selector, const QString &fileName);
-    void sendEvent(const QString &type, const QVariant &arg1 = QVariant(), const QVariant &arg2 = QVariant());
+    void _uploadFile(const QString &selector, const QStringList &fileNames);
+    void sendEvent(const QString &type, const QVariant &arg1 = QVariant(), const QVariant &arg2 = QVariant(), const QString &mouseButton = QString(), const QVariant &modifierArg = QVariant());
 
+    void setContent(const QString &content, const QString &baseUrl);
     /**
      * Returns a Child Page that matches the given <code>"window.name"</code>.
      * This utility method is faster than accessing the
@@ -284,6 +336,13 @@ public slots:
      */
     bool switchToParentFrame();
     /**
+     * Switches to the currently focused frame, as per QWebPage.  This is the frame whose
+     * window element was last focus()ed, and is currently the target of key events.
+     *
+     * @brief switchToFocusedFrame
+     */
+    void switchToFocusedFrame();
+    /**
      * Returns the name of the Current Frame (if it has one)
      *
      * @deprecated
@@ -292,8 +351,108 @@ public slots:
      */
     QString currentFrameName() const;
 
-    void setCookies(const QVariantList &cookies);
+    /**
+     * Allows to set cookies by this Page, at the current URL.
+     * This means that loading new URLs, causes the cookies to change dynamically
+     * as in a normal desktop browser.
+     *
+     * Cookies are expected in the format:
+     * <pre>
+     * {
+     *   "name"     : "cookie name (string)",
+     *   "value"    : "cookie value (string)",
+     *   "domain"   : "cookie domain (string)",
+     *   "path"     : "cookie path (string, optional)",
+     *   "httponly" : "http only cookie (boolean, optional)",
+     *   "secure"   : "secure cookie (boolean, optional)",
+     *   "expires"  : "expiration date (string, GMT format, optional)"
+     * }
+     * </pre>
+     * @brief setCookies
+     * @param cookies Expects a QList of QVariantMaps
+     * @return Boolean "true" if at least 1 cookie was set
+     */
+    bool setCookies(const QVariantList &cookies);
+    /**
+     * Cookies visible by this Page, at the current URL.
+     *
+     * @see WebPage::setCookies for details on the format
+     * @brief cookies
+     * @return QList of QVariantMap cookies visible to this Page, at the current URL.
+     */
     QVariantList cookies() const;
+    /**
+     * Add a Cookie in QVariantMap format
+     * @see WebPage::setCookies for details on the format
+     * @brief addCookie
+     * @param cookie Cookie in QVariantMap format
+     * @return Boolean "true" if cookie was added
+     */
+    bool addCookie(const QVariantMap &cookie);
+    /**
+     * Delete cookie by name from the ones visible by this Page, at the current URL
+     * @brief deleteCookie
+     * @param cookieName Name of the Cookie to delete
+     * @return Boolean "true" if cookie was deleted
+     */
+    bool deleteCookie(const QString &cookieName);
+    /**
+     * Delete All Cookies visible by this Page, at the current URL
+     * @brief clearCookies
+     * @return Boolean "true" if cookies were deleted
+     */
+    bool clearCookies();
+
+    /**
+     * Checks if this Page can go back in the Navigation History
+     * @brief canGoBack
+     * @return "true" if it can, "false" otherwise
+     */
+    bool canGoBack();
+    /**
+     * Goes back in the Navigation History
+     * @brief goBack
+     * @return "true" if it does go back in the Navigation History, "false" otherwise
+     */
+    bool goBack();
+    /**
+     * Checks if this Page can go forward in the Navigation History (i.e. next URL)
+     * @brief canGoForward
+     * @return "true" if it can, "false" otherwise
+     */
+    bool canGoForward();
+    /**
+     * Goes forward in the Navigation History
+     * @brief goForward
+     * @return "true" if it does go forward in the Navigation History, "false" otherwise
+     */
+    bool goForward();
+    /**
+     * Go to the page identified by its relative location to the current page.
+     * For example '-1' for the previous page or 1 for the next page.
+     *
+     * Modelled after JavaScript "window.go(num)" method:
+     * {@see https://developer.mozilla.org/en-US/docs/DOM/window.history#Syntax}.
+     * @brief go
+     * @param historyRelativeIndex
+     * @return "true" if it does go forward/backgward in the Navigation History, "false" otherwise
+     */
+    bool go(int historyRelativeIndex);
+    /**
+     * Reload current page
+     * @brief reload
+     */
+    void reload();
+    /**
+     * Stop loading page (if the page is loading)
+     *
+     * NOTE: This method does nothing when page is not actually loading.
+     * It's effect can be applied in that very short window of time between
+     * "onLoadStarted" and "onLoadFinished".
+     *
+     * @brief stop
+     */
+    void stop();
 
 signals:
     void initialized();
@@ -302,15 +461,17 @@ signals:
     void javaScriptAlertSent(const QString &msg);
     void javaScriptConsoleMessageSent(const QString &message);
     void javaScriptErrorSent(const QString &msg, const QString &stack);
-    void resourceRequested(const QVariant &req);
+    void resourceRequested(const QVariant &requestData, QObject *request);
     void resourceReceived(const QVariant &resource);
+    void resourceError(const QVariant &errorData);
     void urlChanged(const QUrl &url);
     void navigationRequested(const QUrl &url, const QString &navigationType, bool navigationLocked, bool isMainFrame);
     void rawPageCreated(QObject *page);
+    void closing(QObject *page);
 
 private slots:
     void finish(bool ok);
-    void handleJavaScriptWindowObjectCleared();
+    void setupFrame(QWebFrame *frame = NULL);
 
 private:
     QImage renderImage();
@@ -318,15 +479,23 @@ private:
     void applySettings(const QVariantMap &defaultSettings);
     QString userAgent() const;
 
+    /**
+     * Switches focus from the Current Frame to the Child Frame, identified by `frame`.
+     *
+     * @brief changeCurrentFrame
+     * @param frame The Child frame
+     */
+    void changeCurrentFrame(QWebFrame * const frame);
+
+    QString filePicker(const QString &oldFile);
     bool javaScriptConfirm(const QString &msg);
     bool javaScriptPrompt(const QString &msg, const QString &defaultValue, QString *result);
-
-    virtual void initCompletions();
 
 private:
     CustomPage *m_customWebPage;
     NetworkAccessManager *m_networkAccessManager;
     QWebFrame *m_mainFrame;
+    QWebFrame *m_currentFrame;
     QRect m_clipRect;
     QPoint m_scrollPosition;
     QVariantMap m_paperSize; // For PDF output via render()
@@ -335,6 +504,7 @@ private:
     WebpageCallbacks *m_callbacks;
     bool m_navigationLocked;
     QPoint m_mousePos;
+    bool m_ownsPages;
 
     friend class Phantom;
     friend class CustomPage;

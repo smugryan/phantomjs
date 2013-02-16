@@ -2,6 +2,7 @@
   This file is part of the PhantomJS project from Ofi Labs.
 
   Copyright (C) 2012 execjosh, http://execjosh.blogspot.com
+  Copyright (C) 2012 James M. Greene <james.m.greene@gmail.com>
 
   Redistribution and use in source and binary forms, with or without
   modification, are permitted provided that the following conditions are met:
@@ -29,13 +30,18 @@
 
 #include "system.h"
 
-#include <QVariantMap>
+#include <QApplication>
+#include <QSslSocket>
 #include <QSysInfo>
+#include <QVariantMap>
 
 #include "../env.h"
 
 System::System(QObject *parent) :
-    REPLCompletable(parent)
+    QObject(parent)
+  , m_stdout((File *)NULL)
+  , m_stderr((File *)NULL)
+  , m_stdin((File *)NULL)
 {
     // Populate "env"
     m_env = Env::instance()->asVariantMap();
@@ -119,6 +125,28 @@ System::System(QObject *parent) :
 #endif
 }
 
+System::~System()
+{
+    // Clean-up standard streams
+    if ((File *)NULL != m_stdout) {
+        delete m_stdout;
+        m_stdout = (File *)NULL;
+    }
+    if ((File *)NULL != m_stderr) {
+        delete m_stderr;
+        m_stderr = (File *)NULL;
+    }
+    if ((File *)NULL != m_stdin) {
+        delete m_stdin;
+        m_stdin = (File *)NULL;
+    }
+}
+
+qint64 System::pid() const
+{
+    return QApplication::applicationPid();
+}
+
 void System::setArgs(const QStringList &args)
 {
     m_args = args;
@@ -139,10 +167,37 @@ QVariant System::os() const
     return m_os;
 }
 
-void System::initCompletions()
+bool System::isSSLSupported() const
 {
-    addCompletion("args");
-    addCompletion("env");
-    addCompletion("platform");
-    addCompletion("os");
+    return QSslSocket::supportsSsl();
+}
+
+QObject *System::_stdout() {
+    if ((File *)NULL == m_stdout) {
+        QFile *f = new QFile();
+        f->open(stdout, QIODevice::WriteOnly | QIODevice::Unbuffered);
+        m_stdout = new File(f, (QTextCodec *)NULL, this);
+    }
+
+    return m_stdout;
+}
+
+QObject *System::_stderr() {
+    if ((File *)NULL == m_stderr) {
+        QFile *f = new QFile();
+        f->open(stderr, QIODevice::WriteOnly | QIODevice::Unbuffered);
+        m_stderr = new File(f, (QTextCodec *)NULL, this);
+    }
+
+    return m_stderr;
+}
+
+QObject *System::_stdin() {
+    if ((File *)NULL == m_stdin) {
+        QFile *f = new QFile();
+        f->open(stdin, QIODevice::ReadOnly | QIODevice::Unbuffered);
+        m_stdin = new File(f, (QTextCodec *)NULL, this);
+    }
+
+    return m_stdin;
 }

@@ -36,9 +36,23 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QSet>
+#include <QSslConfiguration>
 
 class Config;
 class QNetworkDiskCache;
+class QSslConfiguration;
+
+class JsNetworkRequest : public QObject
+{
+    Q_OBJECT
+
+public:
+    JsNetworkRequest(QNetworkReply* reply);
+    Q_INVOKABLE void abort();
+
+private:
+    QNetworkReply* m_networkReply;
+};
 
 class NetworkAccessManager : public QNetworkAccessManager
 {
@@ -47,25 +61,32 @@ public:
     NetworkAccessManager(QObject *parent, const Config *config);
     void setUserName(const QString &userName);
     void setPassword(const QString &password);
+    void setMaxAuthAttempts(int maxAttempts);
     void setCustomHeaders(const QVariantMap &headers);
     QVariantMap customHeaders() const;
-    void setCookies(const QVariantList &cookies);
-    QVariantList cookies() const;
+
+    void setCookieJar(QNetworkCookieJar *cookieJar);
 
 protected:
     bool m_ignoreSslErrors;
+    int m_authAttempts;
+    int m_maxAuthAttempts;
     QString m_userName;
     QString m_password;
     QNetworkReply *createRequest(Operation op, const QNetworkRequest & req, QIODevice * outgoingData = 0);
+    void handleFinished(QNetworkReply *reply, const QVariant &status, const QVariant &statusText);
 
 signals:
-    void resourceRequested(const QVariant& data);
+    void resourceRequested(const QVariant& data, QObject *);
     void resourceReceived(const QVariant& data);
+    void resourceError(const QVariant& data);
 
 private slots:
     void handleStarted();
     void handleFinished(QNetworkReply *reply);
     void provideAuthentication(QNetworkReply *reply, QAuthenticator *authenticator);
+    void handleSslErrors(const QList<QSslError> &errors);
+    void handleNetworkError();
 
 private:
     QHash<QNetworkReply*, int> m_ids;
@@ -73,7 +94,7 @@ private:
     int m_idCounter;
     QNetworkDiskCache* m_networkDiskCache;
     QVariantMap m_customHeaders;
-    QVariantList m_cookies;
+    QSslConfiguration m_sslConfiguration;
 };
 
 #endif // NETWORKACCESSMANAGER_H

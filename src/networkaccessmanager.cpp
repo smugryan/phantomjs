@@ -34,7 +34,9 @@
 #include <QNetworkDiskCache>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QSslSocket>
 
+#include "phantom.h"
 #include "config.h"
 #include "cookiejar.h"
 #include "networkaccessmanager.h"
@@ -65,16 +67,32 @@ static const char *toString(QNetworkAccessManager::Operation op)
     return str;
 }
 
+JsNetworkRequest::JsNetworkRequest(QNetworkReply* reply)
+{
+    setParent(reply);
+
+    m_networkReply = reply;
+}
+
+
+void JsNetworkRequest::abort()
+{
+    if (m_networkReply->isRunning() || !m_networkReply->isFinished()) {
+        m_networkReply->abort();
+    }
+}
+
 // public:
 NetworkAccessManager::NetworkAccessManager(QObject *parent, const Config *config)
     : QNetworkAccessManager(parent)
     , m_ignoreSslErrors(config->ignoreSslErrors())
+    , m_authAttempts(0)
+    , m_maxAuthAttempts(3)
     , m_idCounter(0)
     , m_networkDiskCache(0)
+    , m_sslConfiguration(QSslConfiguration::defaultConfiguration())
 {
-    if (!config->cookiesFile().isEmpty()) {
-        setCookieJar(new CookieJar(config->cookiesFile()));
-    }
+    setCookieJar(CookieJar::instance());
 
     if (config->diskCacheEnabled()) {
         m_networkDiskCache = new QNetworkDiskCache(this);
@@ -82,6 +100,25 @@ NetworkAccessManager::NetworkAccessManager(QObject *parent, const Config *config
         if (config->maxDiskCacheSize() >= 0)
             m_networkDiskCache->setMaximumCacheSize(config->maxDiskCacheSize() * 1024);
         setCache(m_networkDiskCache);
+    }
+
+    if (QSslSocket::supportsSsl()) {
+        m_sslConfiguration = QSslConfiguration::defaultConfiguration();
+
+        if (config->ignoreSslErrors()) {
+            m_sslConfiguration.setPeerVerifyMode(QSslSocket::VerifyNone);
+        }
+
+        // set the SSL protocol to SSLv3 by the default
+        m_sslConfiguration.setProtocol(QSsl::SslV3);
+
+        if (config->sslProtocol() == "sslv2") {
+            m_sslConfiguration.setProtocol(QSsl::SslV2);
+        } else if (config->sslProtocol() == "tlsv1") {
+            m_sslConfiguration.setProtocol(QSsl::TlsV1);
+        } else if (config->sslProtocol() == "any") {
+            m_sslConfiguration.setProtocol(QSsl::AnyProtocol);
+        }
     }
 
     connect(this, SIGNAL(authenticationRequired(QNetworkReply*,QAuthenticator*)), SLOT(provideAuthentication(QNetworkReply*,QAuthenticator*)));
@@ -98,6 +135,11 @@ void NetworkAccessManager::setPassword(const QString &password)
     m_password = password;
 }
 
+void NetworkAccessManager::setMaxAuthAttempts(int maxAttempts)
+{
+    m_maxAuthAttempts = maxAttempts;
+}
+
 void NetworkAccessManager::setCustomHeaders(const QVariantMap &headers)
 {
     m_customHeaders = headers;
@@ -108,20 +150,27 @@ QVariantMap NetworkAccessManager::customHeaders() const
     return m_customHeaders;
 }
 
-void NetworkAccessManager::setCookies(const QVariantList &cookies)
+void NetworkAccessManager::setCookieJar(QNetworkCookieJar *cookieJar)
 {
-    m_cookies = cookies;
-}
-
-QVariantList NetworkAccessManager::cookies() const
-{
-    return m_cookies;
+    QNetworkAccessManager::setCookieJar(cookieJar);
+    // Remove NetworkAccessManager's ownership of this CookieJar and
+    // pass it to the PhantomJS Singleton object.
+    // CookieJar is a SINGLETON, shouldn't be deleted when
+    // the NetworkAccessManager is deleted but only when we shutdown.
+    cookieJar->setParent(Phantom::instance());
 }
 
 // protected:
 QNetworkReply *NetworkAccessManager::createRequest(Operation op, const QNetworkRequest & request, QIODevice * outgoingData)
 {
     QNetworkRequest req(request);
+
+    if (!QSslSocket::supportsSsl()) {
+        if (req.url().scheme().toLower() == QLatin1String("https"))
+            qWarning() << "Request using https scheme without SSL support";
+    } else {
+        req.setSslConfiguration(m_sslConfiguration);
+    }
 
     // Get the URL string before calling the superclass. Seems to work around
     // segfaults in Qt 4.8: https://gist.github.com/1430393
@@ -142,30 +191,8 @@ QNetworkReply *NetworkAccessManager::createRequest(Operation op, const QNetworkR
         ++i;
     }
 
-    // set HTTP cookies
-    QList<QNetworkCookie> cookieList;
-    for (int i = 0; i < m_cookies.size(); ++i) {
-        QNetworkCookie nc;
-        QVariantMap cookie = m_cookies.at(i).toMap();
-        nc.setDomain(cookie.value("domain").toString());
-        nc.setName(cookie.value("name").toByteArray());
-        nc.setValue(cookie.value("value").toByteArray());
-        if (!cookie.value("path").isNull()) { nc.setPath(cookie.value("path").toString()); }
-        if (!cookie.value("expires").isNull()) { nc.setExpirationDate(cookie.value("expires").toDateTime()); }
-        if (!cookie.value("httponly").isNull()) { nc.setHttpOnly(cookie.value("httponly").toBool()); }
-        if (!cookie.value("secure").isNull()) { nc.setSecure(cookie.value("secure").toBool()); }
-        cookieList.append(nc);
-    }
-    if (m_cookies.size() > 0) {
-        QNetworkCookieJar* cookiejar = cookieJar();
-        cookiejar->setCookiesFromUrl(cookieList, req.url());
-    }
-
     // Pass duty to the superclass - Nothing special to do here (yet?)
     QNetworkReply *reply = QNetworkAccessManager::createRequest(op, req, outgoingData);
-    if(m_ignoreSslErrors) {
-        reply->ignoreSslErrors();
-    }
 
     QVariantList headers;
     foreach (QByteArray headerName, req.rawHeaderList()) {
@@ -184,10 +211,11 @@ QNetworkReply *NetworkAccessManager::createRequest(Operation op, const QNetworkR
     data["method"] = toString(op);
     data["headers"] = headers;
     data["time"] = QDateTime::currentDateTime();
-
+    
     connect(reply, SIGNAL(readyRead()), this, SLOT(handleStarted()));
+    connect(reply, SIGNAL(sslErrors(const QList<QSslError> &)), this, SLOT(handleSslErrors(const QList<QSslError> &)));
+    connect(reply, SIGNAL(error(QNetworkReply::NetworkError)), this, SLOT(handleNetworkError()));
 
-    emit resourceRequested(data);
     return reply;
 }
 
@@ -200,7 +228,7 @@ void NetworkAccessManager::handleStarted()
         return;
 
     m_started += reply;
-
+    
     QVariantList headers;
     foreach (QByteArray headerName, reply->rawHeaderList()) {
         QVariantMap header;
@@ -221,10 +249,37 @@ void NetworkAccessManager::handleStarted()
     data["headers"] = headers;
     data["time"] = QDateTime::currentDateTime();
 
-    emit resourceReceived(data);
+    JsNetworkRequest* jsNetworkRequest = new JsNetworkRequest(reply);
+    emit resourceRequested(data, jsNetworkRequest);
 }
 
 void NetworkAccessManager::handleFinished(QNetworkReply *reply)
+{
+    if (!m_ids.contains(reply))
+        return;
+
+    QVariant status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute);
+    QVariant statusText = reply->attribute(QNetworkRequest::HttpReasonPhraseAttribute);
+
+    this->handleFinished(reply, status, statusText);
+}
+
+void NetworkAccessManager::provideAuthentication(QNetworkReply *reply, QAuthenticator *authenticator)
+{
+    if (m_authAttempts++ < m_maxAuthAttempts)
+    {
+        authenticator->setUser(m_userName);
+        authenticator->setPassword(m_password);
+    }
+    else
+    {
+        m_authAttempts = 0;
+        this->handleFinished(reply, 401, "Authorization Required");
+        reply->close();
+    }
+}
+
+void NetworkAccessManager::handleFinished(QNetworkReply *reply, const QVariant &status, const QVariant &statusText)
 {
     QVariantList headers;
     foreach (QByteArray headerName, reply->rawHeaderList()) {
@@ -238,8 +293,8 @@ void NetworkAccessManager::handleFinished(QNetworkReply *reply)
     data["stage"] = "end";
     data["id"] = m_ids.value(reply);
     data["url"] = reply->url().toEncoded().data();
-    data["status"] = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute);
-    data["statusText"] = reply->attribute(QNetworkRequest::HttpReasonPhraseAttribute);
+    data["status"] = status;
+    data["statusText"] = statusText;
     data["contentType"] = reply->header(QNetworkRequest::ContentTypeHeader);
     data["redirectURL"] = reply->header(QNetworkRequest::LocationHeader);
     data["headers"] = headers;
@@ -251,9 +306,36 @@ void NetworkAccessManager::handleFinished(QNetworkReply *reply)
     emit resourceReceived(data);
 }
 
-void NetworkAccessManager::provideAuthentication(QNetworkReply *reply, QAuthenticator *authenticator)
+void NetworkAccessManager::handleSslErrors(const QList<QSslError> &errors)
 {
-    Q_UNUSED(reply);
-    authenticator->setUser(m_userName);
-    authenticator->setPassword(m_password);
+    QNetworkReply *reply = qobject_cast<QNetworkReply*>(sender());
+    foreach (QSslError e, errors) {
+        qDebug() << "Network - SSL Error:" << e;
+    }
+
+    if (m_ignoreSslErrors)
+        reply->ignoreSslErrors();
+}
+
+void NetworkAccessManager::handleNetworkError()
+{
+    QNetworkReply *reply = qobject_cast<QNetworkReply*>(sender());
+    qDebug() << "Network - Resource request error:"
+             << reply->error()
+             << "(" << reply->errorString() << ")"
+             << "URL:" << reply->url().toString();
+
+    m_ids.remove(reply);
+
+    if (m_started.contains(reply))
+        m_started.remove(reply);
+
+    QVariantMap data;
+    data["url"] = reply->url().toString();
+    data["errorCode"] = reply->error();
+    data["errorString"] = reply->errorString();
+
+    emit resourceError(data);
+
+    reply->deleteLater();
 }

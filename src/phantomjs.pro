@@ -6,6 +6,7 @@ CONFIG += console
 DESTDIR = ../bin
 
 RESOURCES = phantomjs.qrc \
+    ghostdriver/ghostdriver.qrc \
     qt/src/3rdparty/webkit/Source/WebCore/inspector/front-end/WebKit.qrc \
     qt/src/3rdparty/webkit/Source/WebCore/generated/InspectorBackendStub.qrc
 
@@ -24,8 +25,8 @@ HEADERS += csconverter.h \
     terminal.h \
     encoding.h \
     config.h \
-    repl.h \
-    replcompletable.h
+    childprocess.h \
+    repl.h
 
 SOURCES += phantom.cpp \
     callback.cpp \
@@ -42,20 +43,22 @@ SOURCES += phantom.cpp \
     terminal.cpp \
     encoding.cpp \
     config.cpp \
-    repl.cpp \
-    replcompletable.cpp
+    childprocess.cpp \
+    repl.cpp
 
-OTHER_FILES += usage.txt \
+OTHER_FILES += \
     bootstrap.js \
     configurator.js \
     modules/fs.js \
     modules/webpage.js \
     modules/webserver.js \
+    modules/child_process.js \
     repl.js
 
 include(gif/gif.pri)
 include(mongoose/mongoose.pri)
 include(linenoise/linenoise.pri)
+include(qcommandline/qcommandline.pri)
 
 linux*|mac {
     INCLUDEPATH += breakpad/src
@@ -118,6 +121,7 @@ win32-msvc* {
             qcncodecs \
             qjpcodecs \
             qkrcodecs \
-            qtwcodecs
+            qtwcodecs \
+            qico
     }
 }

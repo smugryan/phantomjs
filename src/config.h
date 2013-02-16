@@ -34,8 +34,11 @@
 #include <QString>
 #include <QStringList>
 #include <QNetworkProxy>
+#include <QVariant>
 
-class Config: QObject
+class QCommandLine;
+
+class Config: public QObject
 {
     Q_OBJECT
     Q_PROPERTY(QString cookiesFile READ cookiesFile WRITE setCookiesFile)
@@ -54,6 +57,9 @@ class Config: QObject
     Q_PROPERTY(bool printDebugMessages READ printDebugMessages WRITE setPrintDebugMessages)
     Q_PROPERTY(bool javascriptCanOpenWindows READ javascriptCanOpenWindows WRITE setJavascriptCanOpenWindows)
     Q_PROPERTY(bool javascriptCanCloseWindows READ javascriptCanCloseWindows WRITE setJavascriptCanCloseWindows)
+    Q_PROPERTY(QString sslProtocol READ sslProtocol WRITE setSslProtocol)
+    Q_PROPERTY(QString webdriver READ webdriver WRITE setWebdriver)
+    Q_PROPERTY(QString webdriverSeleniumGridHub READ webdriverSeleniumGridHub WRITE setWebdriverSeleniumGridHub)
 
 public:
     Config(QObject *parent = 0);
@@ -61,6 +67,8 @@ public:
     void init(const QStringList *const args);
     void processArgs(const QStringList &args);
     void loadJsonFile(const QString &filePath);
+
+    QString helpText() const;
 
     bool autoLoadImages() const;
     void setAutoLoadImages(const bool value);
@@ -143,6 +151,22 @@ public:
     void setJavascriptCanCloseWindows(const bool value);
     bool javascriptCanCloseWindows() const;
 
+    void setSslProtocol(const QString& sslProtocolName);
+    QString sslProtocol() const;
+
+    void setWebdriver(const QString& webdriverConfig);
+    QString webdriver() const;
+    bool isWebdriverMode() const;
+
+    void setWebdriverSeleniumGridHub(const QString& hubUrl);
+    QString webdriverSeleniumGridHub() const;
+
+public slots:
+    void handleSwitch(const QString &sw);
+    void handleOption(const QString &option, const QVariant &value);
+    void handleParam(const QString& param, const QVariant &value);
+    void handleError(const QString &error);
+
 private:
     void resetToDefaults();
     void setProxyHost(const QString &value);
@@ -150,6 +174,7 @@ private:
     void setAuthUser(const QString &value);
     void setAuthPass(const QString &value);
 
+    QCommandLine *m_cmdLine;
     bool m_autoLoadImages;
     QString m_cookiesFile;
     QString m_offlineStoragePath;
@@ -179,6 +204,9 @@ private:
     bool m_printDebugMessages;
     bool m_javascriptCanOpenWindows;
     bool m_javascriptCanCloseWindows;
+    QString m_sslProtocol;
+    QString m_webdriver;
+    QString m_webdriverSeleniumGridHub;
 };
 
 #endif // CONFIG_H
